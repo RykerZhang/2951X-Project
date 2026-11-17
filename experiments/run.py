@@ -4,6 +4,7 @@ Usage:
     python -m experiments.run --model true   --noise 0             # validation condition
     python -m experiments.run --model true   --noise 0.5
     python -m experiments.run --model flawed --noise 0.5
+    python -m experiments.run --model tree   --noise 0.5 --n 200   # learned I' and T'
 """
 import argparse
 import copy
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from env.world import Env, features
 from skills.library import SKILLS, CHAINS
-from learning.models import TrueModel, HandFlawedModel
+from learning.models import TrueModel, HandFlawedModel, TreeModel
 from diagnostics.label import label
 
 MAX_STEPS = 20
@@ -83,7 +84,7 @@ def run_chain(env, chain, s, model):
     return records
 
 
-MODELS = {"true": TrueModel, "flawed": HandFlawedModel}
+MODELS = {"true": TrueModel, "flawed": HandFlawedModel, "tree": TreeModel}
 
 
 def main():
@@ -93,18 +94,33 @@ def main():
     p.add_argument("--seeds", type=int, default=10)
     p.add_argument("--runs", type=int, default=50)
     p.add_argument("--out", default="logs")
+    # Knobs of --model tree; see TreeModel in learning/models.py for what they mean
+    p.add_argument("--n", type=int, default=200)
+    p.add_argument("--source", choices=["chain", "random"], default="chain")
+    p.add_argument("--learn", choices=["both", "I", "T"], default="both")
+    p.add_argument("--p-start", type=float, default=0.5)
+    p.add_argument("--p-done", type=float, default=0.5)
     a = p.parse_args()
 
     cond = f"{a.model}+noise{a.noise}"
+    if a.model == "tree":
+        cond = (f"tree-{a.source}-n{a.n}-learn{a.learn}-ps{a.p_start}-pd{a.p_done}"
+                f"+noise{a.noise}")
     out = Path(a.out) / f"{cond}.jsonl"
     out.parent.mkdir(exist_ok=True)
     counts = {c: Counter() for c in CHAINS}
     with out.open("w") as fh:
         for seed in range(a.seeds):
+            # Trees are trained once per seed (one training set = one learned agent), in worlds
+            # with the same randomness as the experiment, and reused for all runs of the seed.
+            # The other models are rebuilt for every run, as before.
+            tree = TreeModel(seed=seed, n=a.n, source=a.source, learn=a.learn,
+                             p_start=a.p_start, p_done=a.p_done, max_steps=MAX_STEPS,
+                             layout_noise=a.noise) if a.model == "tree" else None
             for run in range(a.runs):
                 for chain_name, chain in CHAINS.items():
                     env = Env(seed=seed * 100_000 + run, layout_noise=a.noise)
-                    model = MODELS[a.model](seed=seed * 100_000 + run)
+                    model = tree or MODELS[a.model](seed=seed * 100_000 + run)
                     records = run_chain(env, chain, env.reset(), model)
                     lab, info = label(records)
                     tag = lab + ("_detected" if info.get("detected") else

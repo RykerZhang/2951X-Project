@@ -95,11 +95,13 @@ proposal 里的写法是"the initiation set and the termination condition are le
 
 用机器学习里最简单的一种：监督学习的决策树（sklearn），几秒钟就能训练完。
 
-1. **造数据**：随机生成一个状态，让技能真跑一次，记下"特征 + 成功/失败"。重复几百上千次
+1. **造数据**：把 agent 放到一个起点，让技能真跑一次。起点的特征 + 这次跑成没成，是 I' 的一条样本；途中每个状态的特征 + 子目标达成没有，是 T' 的样本。重复几百上千次
 2. **训练**：每个技能训练两棵决策树，一棵学 I'（能不能开始），一棵学 T'（做完没有）
 3. **使用**：控制器问 `can_start` / `is_done` 时，由决策树回答
 
 注意：训练用的"成功/失败"必须是真跑出来的，**不能直接调用技能里写好的真实规则来填**，否则等于抄了答案。
+
+起点从哪来是一个旋钮（`source`）：`chain` 用链真正交给这个技能的状态，`random` 用随机的位置和背包。起点时子目标已经达成的，不算 I' 的样本：什么都没做就"成功"，说明不了动作行不行。用法和两种起点的对比见 6.6 节。
 
 特征 f(s) 定义在 `env/world.py` 的 `features()` 里：木头、木板、石头、镐、熔炉的数量，镐的耐久，所在区域，是否在工作台旁。
 
@@ -253,10 +255,12 @@ oracle 的意思是"模拟器作弊，把某一环修到完美"。它现在的�
 ```bash
 cd skill-chains                                        # 先进入项目根目录，下面的命令都在这里运行
 pip install pytest scikit-learn                        # 现在的代码只依赖标准库 + pytest；决策树要 sklearn
-python -m pytest -q                                    # 跑全部测试，现在应该是 13 passed
+python -m pytest -q                                    # 跑全部测试，现在应该是 33 passed（没装 sklearn 时是 13 passed, 1 skipped）
 python -m experiments.run --model true   --noise 0     # 验证条件：应该全部 ok
 python -m experiments.run --model true   --noise 0.5   # 加随机性
 python -m experiments.run --model flawed --noise 0.5   # 加手写的"学错"规则
+python -m experiments.run --model tree   --noise 0.5   # 决策树学到的规则，旋钮见 6.6 节
+python -m learning.report --noise 0.5                  # 打印学到的规则和每个技能的准确率
 ```
 
 每次运行会在 `logs/` 下写一个 JSONL 日志，每次执行一个技能写一行。
@@ -267,7 +271,9 @@ python -m experiments.run --model flawed --noise 0.5   # 加手写的"学错"规
 |---|---|---|
 | `env/world.py` | 地图、状态、三个动作、随机性旋钮、特征 f(s) | 世界负责人 |
 | `skills/library.py` | 技能和实验用的链 | 技能负责人 |
-| `learning/models.py` | 真实规则 `TrueModel`、手写的 `HandFlawedModel`、决策树 `TreeModel`（TODO） | 学习线 |
+| `learning/models.py` | 真实规则 `TrueModel`、手写的 `HandFlawedModel`、决策树 `TreeModel` | 学习线 |
+| `learning/data.py` | 真跑技能，采集 I' 和 T' 的训练数据；随机起点的生成 | 学习线 |
+| `learning/report.py` | 打印学到的规则，在 held-out 数据上算每个技能的准确率 | 学习线 |
 | `diagnostics/label.py` | `label()` 上帝视角标签；`label_runtime()` agent 视角标签（TODO） | 归因线 |
 | `experiments/run.py` | 执行循环、日志、批量实验 | 实验与分析线 |
 | `analysis/plots.py` | 画图（TODO） | 实验与分析线 |
@@ -303,6 +309,45 @@ python -m experiments.run --model flawed --noise 0.5   # 加手写的"学错"规
 
 **这些数字只用来检查骨架是否正常，不是实验结论。** L1 和 L3 来自手写的错误，正式实验必须换成决策树。
 
+### 6.6 决策树 `TreeModel` 怎么用
+
+```python
+from learning.models import TreeModel
+model = TreeModel(seed=0, n=200, layout_noise=0.5)   # 训练在这一行完成；一个种子建一个，所有 run 共用
+```
+
+| 旋钮 | 含义 | 默认 |
+|---|---|---|
+| `n` | 每个技能真跑多少次，也就是 I' 的样本数 | 200 |
+| `source` | 起点从哪来：`chain` 或 `random`（见 2.3） | `chain` |
+| `learn` | `both`；或者只学 `I`、只学 `T`，另一个用真实规则 | `both` |
+| `p_start` | 树估计的成功概率 ≥ `p_start` 才开始。调低更乐观 | 0.5 |
+| `p_done` | 树估计"子目标已达成"的概率 ≥ `p_done` 就停。调低停得更早 | 0.5 |
+| `layout_noise` 等 | 训练用的世界有多少随机性，原样传给 `Env`。`experiments.run` 里和实验的随机性相同 | 0 |
+
+- 命令行里对应 `--n`、`--source`、`--learn`、`--p-start`、`--p-done`，日志文件名里带着这些值。
+- 同一个种子和旋钮，训练出的树完全一样。训练的世界、报告用的 held-out 世界、实验的世界，种子互不重叠。
+- `python -m learning.report` 打印每个技能学到的规则，以及在两种起点上的 held-out 准确率。**两种都要看**：在随机起点上准的规则，在链交过来的状态上可能是错的。
+- 世界加了新物品以后，要在 `learning/data.py` 的 `INVENTORY_MAX` 里加上，否则有一个测试会失败并提示。
+- `chain` 起点下，不在任何一条链里的技能（现在是 `go_forest`）没有训练数据，问到它会直接报错。
+
+检查用的结果（做熔炉这条链，10 个种子 × 50 次；和 6.5 一样，不是实验结论）：
+
+| 条件 | 结果 |
+|---|---|
+| `chain`，n=200，无随机性 | ok 100% |
+| `chain`，n=200，随机性 0.5 | ok 25%，L1 12%，L2 27%，L4 已察觉 37% |
+| 同上，`--p-start 0.3` | ok 31%，L2 32%，L4 已察觉 37%（和真实规则一样） |
+| 同上，`--p-start 0.7` | ok 1%，L1 68%，L4 已察觉 32% |
+| `chain`，n=5，随机性 0.5 | ok 13%，L1 24%，L2 20%，L3 停早 10%，L4 已察觉 18%，L4 未察觉 6%，other 8% |
+| `random`，n=200，无随机性 | ok 30%，L1 70% |
+| `random`，n=200，随机性 0.5 | ok 10%，L1 45%，L2 12%，L4 已察觉 33% |
+
+> 待组会确认（学习线提出）：
+> 1. **起点默认用 `chain` 还是 `random`。** `random` 下 `mine_stone` 的 I' 会学成"不能开始"：它成不成取决于 agent 在哪一行，而 f(s) 里没有行，随机起点下大多数会失败。链里 agent 其实常在对的那一行，于是链一直卡在 L1，加数据也不降。`chain` 没有这个问题，但"学到的规则 + 无随机性"这一格不会有任何失败。
+> 2. **`mine_stone` 的 L1 和 L2 是同一件事的两面。** 链内它的成功率接近一半，`p_start` 低于它就总是开始（失败算 L2），高于它就总是不开始（算 L1）。0.5 附近不同种子的结果差别很大（50 次里 L1 从 0 次到 38 次），所以 `p_start` 要在看结果前定好，10 个种子也可能不够。
+> 3. **T' 会学到"链内等价、含义不对"的规则。** 例如 seed 0 的 `make_pickaxe` 学成"木板 ≤ 1 就算做完"。在现有的链里不出错，换一条链就可能停早，这是 L3 的一个自然来源。
+
 ---
 
 ## 7. 要做的事和进度
@@ -311,6 +356,7 @@ python -m experiments.run --model flawed --noise 0.5   # 加手写的"学错"规
 - proposal 已提交，老师批注 "Sounds good, forge ahead!"
 - T1：四类断点的定义和判定顺序
 - 代码骨架：世界、8 个技能（3 个导航、2 个采集、3 个合成）、3 条链、`TrueModel`、`HandFlawedModel`、`label()`、实验主循环、13 个测试
+- 第 4 步：`TreeModel`、训练数据采集、每个技能的准确率报告、20 个测试（见 6.6 节）
 
 ### 7.2 完整清单（12 步）
 
@@ -321,7 +367,7 @@ python -m experiments.run --model flawed --noise 0.5   # 加手写的"学错"规
 | 1 | **定规格**：物品、技能、链条清单定下来并冻结（T4） | 组长 + 世界负责人 + 技能负责人 | 现在都是占位 |
 | 2 | **完善世界**：加铁矿、铁和对应配方 | 世界负责人 | 未开始 |
 | 3 | **完善技能**：加挖铁、炼铁，凑够 10 个技能、3 条链；每个新技能写单元测试 | 技能负责人 | `skills/library.py` 里有 TODO |
-| 4 | **学到的规则**：随机生成状态的函数 → 收集数据 → 训练决策树 → `TreeModel` | 学习线 | 没写；写好之前 L1 和 L3 的结果都不能当真 |
+| 4 | **学到的规则**：随机生成状态的函数 → 收集数据 → 训练决策树 → `TreeModel` | 学习线 | 已完成，见 6.6 节；有 3 个设计问题待组会确认。世界和技能扩充后要重跑报告 |
 | 5 | **运行时规则（T2）**：agent 只看现象，怎么猜是哪类断点；写 `label_runtime()` | 组长定规则，归因线写代码 | 规则没定，代码没写 |
 | 6 | **补标签测试**：用例补到 10 条以上，包括一个 L3 停晚的场景 | 归因线 | 现在有几条；目前没有任何情况会触发 L3 停晚 |
 | 7 | **衔接矩阵**：测每对相邻技能能不能接上，分随机起点和链条起点两版 | 实验与分析线 | 没写 |
