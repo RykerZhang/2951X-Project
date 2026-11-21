@@ -28,7 +28,8 @@ MAX_STEPS = 20   # must equal experiments.run.MAX_STEPS (tests/test_learning.py 
 
 # Largest count of each item that a random start state may hold. World owner: when you add an
 # item to the world, add it here too (test_random_states_vary_every_feature fails until you do).
-INVENTORY_MAX = {"wood": 4, "plank": 4, "stone": 4, "pickaxe": 1, "furnace": 1}
+INVENTORY_MAX = {"wood": 4, "plank": 4, "stone": 4, "pickaxe": 1, "furnace": 1,
+                 "iron_ore": 4, "iron": 4}
 
 # Worlds used for training and for held-out evaluation never share a seed with each other, nor
 # with the experiment worlds (experiments/run.py uses seeds far below 10**9).
